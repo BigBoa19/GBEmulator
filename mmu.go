@@ -9,11 +9,28 @@ type MMU struct {
     io   [128]byte  // I/O ports
     hram [127]byte  // High RAM
     ie   byte       // Interrupt Enable (just 1 byte)
+	scanlineCounter int // Track cycles for LY register
 }
 
 func newMMU(rom []byte) *MMU {
 	return &MMU{
 		rom: rom,
+	}
+}
+
+func (m *MMU) UpdateScanline(cycles int) {
+	m.scanlineCounter += cycles
+	if m.scanlineCounter >= 456 { // 456 cycles per scanline
+		m.scanlineCounter -= 456
+		currentLY := m.io[0x44] // LY is at offset 0x44
+		currentLY++
+		if currentLY == 144 {
+			m.io[0x0F] |= 0x01 // Set VBLANK interrupt flag
+		}
+		if currentLY > 153 {
+			currentLY = 0
+		}
+		m.io[0x44] = currentLY
 	}
 }
 
@@ -34,6 +51,10 @@ func (m *MMU) Read(addr uint16) byte {
 	case addr < 0xFF00: // not usable
 		return 0
 	case addr < 0xFF80: // IO
+		if addr == 0xFF44 { // LY register - current scanline
+			// Return the actual LY value from io array
+			return m.io[0x44]
+		}
 		return m.io[addr - 0xFF00]
 	case addr < 0xFFFF: // HRAM
 		return m.hram[addr - 0xFF80]
@@ -62,6 +83,9 @@ func (m *MMU) Write(addr uint16, b byte) {
 	case addr < 0xFF00: // not usable
 		return
 	case addr < 0xFF80: // IO
+		if addr == 0xFF44 { // LY (scanline)
+			return // LY is read-only, writes are ignored
+		}
 		m.io[addr - 0xFF00] = b
 	case addr < 0xFFFF: // HRAM
 		m.hram[addr - 0xFF80] = b

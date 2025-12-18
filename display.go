@@ -69,6 +69,11 @@ func (g *Game) update() {
 	for g.cycleCount < 70224 {
 		cycles := g.cpu.Step()
 		g.cycleCount += cycles
+		g.cpu.mmu.UpdateScanline(cycles) // Update LY register
+
+		// Check for interrupts after each instruction
+		intCycles := g.cpu.HandleInterrupts()
+		g.cycleCount += intCycles
 	}
 
 	g.ppu.Render()

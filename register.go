@@ -11,6 +11,7 @@ type Registers struct {
 	A, B, C, D, E, F, H, L uint8
 
 	SP, PC uint16
+	IME bool // Interrupt Master Enable
 }
 
 // -----------------------------------------------------------------------------

@@ -3,8 +3,9 @@ package main
 import "fmt"
 
 type CPU struct {
-	Reg *Registers
-	mmu *MMU
+	Reg    *Registers
+	mmu    *MMU
+	halted bool
 }
 
 func newCPU(mmu *MMU) *CPU {
@@ -14,7 +15,49 @@ func newCPU(mmu *MMU) *CPU {
 	}
 }
 
+func (cpu *CPU) HandleInterrupts() int {
+	IF := cpu.mmu.Read(0xFF0F) // Interrupt Flag
+	IE := cpu.mmu.Read(0xFFFF) // Interrupt Enable
+
+	// Check if there's a pending interrupt (this wakes from HALT even if IME is false)
+	interrupts := IF & IE
+	if interrupts != 0 && cpu.halted {
+		cpu.halted = false
+	}
+
+	if !cpu.Reg.IME {
+		return 0
+	}
+
+	if interrupts == 0 {
+		return 0
+	}
+
+	// Check VBLANK interrupt (bit 0)
+	if interrupts&0x01 != 0 {
+		cpu.Reg.IME = false            // Disable interrupts
+		cpu.mmu.Write(0xFF0F, IF&0xFE) // Clear VBLANK bit in IF
+
+		// Push PC to stack
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, uint8((cpu.Reg.PC&0xFF00)>>8))
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, uint8(cpu.Reg.PC&0x00FF))
+
+		// Jump to VBLANK handler
+		cpu.Reg.PC = 0x0040
+		return 20 // Interrupt handling takes 20 cycles
+	}
+
+	return 0
+}
+
 func (cpu *CPU) Step() int {
+	// If halted, don't execute, just consume cycles
+	if cpu.halted {
+		return 4
+	}
+
 	opcode := cpu.mmu.Read(cpu.Reg.PC)
 	cpu.Reg.PC++
 
@@ -50,8 +93,32 @@ func (cpu *CPU) Step() int {
 	case 0x18: // JR
 		offset := int8(cpu.mmu.Read(cpu.Reg.PC))
 		cpu.Reg.PC++
-		cpu.Reg.PC = uint16((int32(cpu.Reg.PC) + int32(offset)))
+		cpu.Reg.PC = uint16(int32(cpu.Reg.PC) + int32(offset))
 		return 12
+	case 0x28: // JR Z - Jump relative if zero flag is set
+		offset := int8(cpu.mmu.Read(cpu.Reg.PC))
+		cpu.Reg.PC++
+		if cpu.Reg.GetZero() {
+			cpu.Reg.PC = uint16(int32(cpu.Reg.PC) + int32(offset))
+			return 12
+		}
+		return 8
+	case 0x19: // ADD HL,DE - Add DE to HL
+		de := cpu.Reg.GetDE()
+		cpu.add16(de)
+		return 8
+	case 0x20: // JR NZ,e - Jump relative if not zero (COPILOT)
+		offset := int8(cpu.mmu.Read(cpu.Reg.PC))
+		cpu.Reg.PC++
+		if !cpu.Reg.GetZero() {
+			cpu.Reg.PC = uint16(int32(cpu.Reg.PC) + int32(offset))
+			return 12
+		}
+		return 8
+	case 0x23: // INC HL - Increment 16-bit register HL
+		hl := cpu.Reg.GetHL()
+		cpu.Reg.SetHL(hl + 1)
+		return 8
 	// ^ initial opcodes
 
 	// ADD
@@ -276,6 +343,11 @@ func (cpu *CPU) Step() int {
 		cpu.cp(cpu.Reg.A)
 		return 4
 
+	case 0x0B: // DEC BC - Decrement 16-bit register BC
+		bc := cpu.Reg.GetBC()
+		bc--
+		cpu.Reg.SetBC(bc)
+		return 8
 	case 0x05: // DEC
 		cpu.Reg.B = cpu.dec(cpu.Reg.B)
 		return 4
@@ -303,7 +375,14 @@ func (cpu *CPU) Step() int {
 	case 0x3D:
 		cpu.Reg.A = cpu.dec(cpu.Reg.A)
 		return 4
-
+	case 0x03: // INC BC
+		bc := cpu.Reg.GetBC()
+		cpu.Reg.SetBC(bc + 1)
+		return 8
+	case 0x13: // INC DE
+		de := cpu.Reg.GetDE()
+		cpu.Reg.SetDE(de + 1)
+		return 8
 	case 0x04: // INC
 		cpu.Reg.B = cpu.inc(cpu.Reg.B)
 		return 4
@@ -332,7 +411,6 @@ func (cpu *CPU) Step() int {
 		cpu.Reg.A = cpu.inc(cpu.Reg.A)
 		return 4
 
-		// LD B,r
 	case 0x40:
 		return 4 // LD B,B (NOP-like)
 	case 0x41:
@@ -499,6 +577,7 @@ func (cpu *CPU) Step() int {
 		cpu.mmu.Write(cpu.Reg.GetHL(), cpu.Reg.L)
 		return 8
 	case 0x76: // HALT - special instruction, not a load
+		cpu.halted = true
 		return 4
 	case 0x77:
 		cpu.mmu.Write(cpu.Reg.GetHL(), cpu.Reg.A)
@@ -545,6 +624,11 @@ func (cpu *CPU) Step() int {
 		cpu.Reg.L = cpu.mmu.Read(cpu.Reg.PC)
 		cpu.Reg.PC++
 		return 8
+	case 0x2F: // CPL - Complement A (flip all bits) (COPILOT)
+		cpu.Reg.A = ^cpu.Reg.A
+		cpu.Reg.SetSubtract(true)
+		cpu.Reg.SetHalfCarry(true)
+		return 4
 	case 0x36: // LD (HL),n
 		val := cpu.mmu.Read(cpu.Reg.PC)
 		cpu.Reg.PC++
@@ -627,8 +711,57 @@ func (cpu *CPU) Step() int {
 	case 0xE0: // LDH (n),A
 		offset := cpu.mmu.Read(cpu.Reg.PC)
 		cpu.Reg.PC++
+		if offset == 0x40 { // LCD Control
+			fmt.Printf("LCD Control write at PC: 0x%04X, value: 0x%02X\n", cpu.Reg.PC-2, cpu.Reg.A)
+		}
 		cpu.mmu.Write(0xFF00|uint16(offset), cpu.Reg.A)
 		return 12
+	case 0xC1: // POP BC
+		lo := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		hi := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		cpu.Reg.SetBC((uint16(hi) << 8) | uint16(lo))
+		return 12
+	case 0xD1: // POP DE
+		lo := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		hi := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		cpu.Reg.SetDE((uint16(hi) << 8) | uint16(lo))
+		return 12
+	case 0xE1: // POP HL - Pop 16-bit value from stack into HL (COPILOT)
+		lo := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		hi := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		cpu.Reg.SetHL((uint16(hi) << 8) | uint16(lo))
+		return 12
+	case 0xF1: // POP HL - Pop 16-bit value from stack into HL (COPILOT)
+		lo := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		hi := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		cpu.Reg.SetAF((uint16(hi) << 8) | uint16(lo))
+		return 12
+	case 0xE6: // AND n - AND A with immediate value
+		val := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		cpu.and(val)
+		return 8
+	case 0xE9:
+		hl := cpu.Reg.GetHL()
+		cpu.Reg.PC = hl
+		return 4
+	case 0xEF: // RST 28H - Call to address 0x0028 (COPILOT)
+		// Push return address onto stack
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, uint8(cpu.Reg.PC>>8))
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, uint8(cpu.Reg.PC&0xFF))
+		// Jump to 0x0028
+		cpu.Reg.PC = 0x0028
+		return 16
 	case 0xF0: // LDH A,(n)
 		offset := cpu.mmu.Read(cpu.Reg.PC)
 		cpu.Reg.PC++
@@ -640,13 +773,119 @@ func (cpu *CPU) Step() int {
 	case 0xF2: // LD A,(C)
 		cpu.Reg.A = cpu.mmu.Read(0xFF00 | uint16(cpu.Reg.C))
 		return 8
-
+	case 0xC2: // JP NZ - Jump if zero flag is not set
+		lo := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		hi := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		if !cpu.Reg.GetZero() {
+			cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
+			return 16
+		}
+		return 12
 	case 0xC3: // JP
 		lo := cpu.mmu.Read(cpu.Reg.PC)
 		cpu.Reg.PC++
 		hi := cpu.mmu.Read(cpu.Reg.PC)
 		cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
 		return 16
+	case 0xCA: // JP Z - Jump if zero flag is set
+		lo := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		hi := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		if cpu.Reg.GetZero() {
+			cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
+			return 16
+		}
+		return 12
+	case 0xCD: // CALL nn - Call subroutine (COPILOT)
+		lo := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		hi := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		// Push return address onto stack
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, uint8(cpu.Reg.PC>>8)) // High byte
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, uint8(cpu.Reg.PC&0xFF)) // Low byte
+		// Jump to target address
+		cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
+		return 24
+	case 0xC5:
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.B)
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.C)
+		return 16
+	case 0xD5: // PUSH DE - Push DE onto stack (COPILOT)
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.D)
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.E)
+		return 16
+	case 0xE5: // PUSH HL
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.H)
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.L)
+		return 16
+	case 0xF5: // PUSH AF
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.A)
+		cpu.Reg.SP--
+		cpu.mmu.Write(cpu.Reg.SP, cpu.Reg.F)
+		return 16
+	case 0xC0: // RET NZ - Return if zero flag not set
+		if !cpu.Reg.GetZero() {
+			lo := cpu.mmu.Read(cpu.Reg.SP)
+			cpu.Reg.SP++
+			hi := cpu.mmu.Read(cpu.Reg.SP)
+			cpu.Reg.SP++
+			cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
+			return 20
+		}
+		return 8
+	case 0xC8: // RET Z - Return if zero flag set
+		if cpu.Reg.GetZero() {
+			lo := cpu.mmu.Read(cpu.Reg.SP)
+			cpu.Reg.SP++
+			hi := cpu.mmu.Read(cpu.Reg.SP)
+			cpu.Reg.SP++
+			cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
+			return 20
+		}
+		return 8
+	case 0xC9: // RET - Return from subroutine
+		// Pop return address from stack
+		lo := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		hi := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
+		return 16
+	case 0xD9: // RETI - Return from interrupt (COPILOT)
+		// Pop return address from stack
+		lo := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		hi := cpu.mmu.Read(cpu.Reg.SP)
+		cpu.Reg.SP++
+		cpu.Reg.PC = (uint16(hi) << 8) | uint16(lo)
+		cpu.Reg.IME = true // Re-enable interrupts
+		return 16
+	case 0xCB: // CB prefix - extended instructions
+		return cpu.executeCB()
+	case 0xF3: // DI - Disable interrupts (COPILOT)
+		cpu.Reg.IME = false
+		return 4
+	case 0xFB: // EI - Enable interrupts
+		cpu.Reg.IME = true
+		return 4
+	case 0xFE: // CP n - Compare A with immediate value (COPILOT)
+		val := cpu.mmu.Read(cpu.Reg.PC)
+		cpu.Reg.PC++
+		cpu.cp(val)
+		return 8
 	default:
 		panic(fmt.Sprintf("Unknown Opcode: 0x%02X at PC: 0x%04X", opcode, cpu.Reg.PC-1))
 	}
@@ -663,6 +902,17 @@ func (cpu *CPU) add(val uint8) {
 	cpu.Reg.SetHalfCarry(nibbleSum > 0x0F)
 
 	cpu.Reg.A = uint8(sum)
+}
+
+func (cpu *CPU) add16(val uint16) {
+	hl := cpu.Reg.GetHL()
+	result := uint32(hl) + uint32(val)
+
+	cpu.Reg.SetSubtract(false)
+	cpu.Reg.SetCarry(result > 0xFFFF)
+	cpu.Reg.SetHalfCarry(((hl & 0x0FFF) + (val & 0x0FFF)) > 0x0FFF)
+
+	cpu.Reg.SetHL(uint16(result))
 }
 
 func (cpu *CPU) adc(val uint8) {
@@ -758,4 +1008,40 @@ func (cpu *CPU) dec(reg uint8) uint8 {
 	cpu.Reg.SetSubtract(true)
 	cpu.Reg.SetHalfCarry((reg & 0x0F) == 0x0F)
 	return reg
+}
+
+func (cpu *CPU) executeCB() int {
+	opcode := cpu.mmu.Read(cpu.Reg.PC)
+	cpu.Reg.PC++
+
+	switch opcode {
+	case 0x11: // RL C - Rotate C left through carry
+		oldCarry := uint8(0)
+		if cpu.Reg.GetCarry() {
+			oldCarry = 1
+		}
+		cpu.Reg.SetCarry((cpu.Reg.C & 0x80) != 0)
+		cpu.Reg.C = (cpu.Reg.C << 1) | oldCarry
+		cpu.Reg.SetZero(cpu.Reg.C == 0)
+		cpu.Reg.SetSubtract(false)
+		cpu.Reg.SetHalfCarry(false)
+		return 8
+	case 0x37: // SWAP A - Swap upper and lower nibbles of A
+		cpu.Reg.A = (cpu.Reg.A << 4) | (cpu.Reg.A >> 4)
+		cpu.Reg.SetZero(cpu.Reg.A == 0)
+		cpu.Reg.SetSubtract(false)
+		cpu.Reg.SetHalfCarry(false)
+		cpu.Reg.SetCarry(false)
+		return 8
+	case 0x7C: // BIT 7,H - Test bit 7 of H
+		cpu.Reg.SetZero((cpu.Reg.H & 0x80) == 0)
+		cpu.Reg.SetSubtract(false)
+		cpu.Reg.SetHalfCarry(true)
+		return 8
+	case 0x87: // RES (reset) 0,A - Reset bit 0 of A
+		cpu.Reg.A &= ^uint8(0x01)
+		return 8
+	default:
+		panic(fmt.Sprintf("Unknown CB Opcode: 0xCB%02X at PC: 0x%04X", opcode, cpu.Reg.PC-1))
+	}
 }
