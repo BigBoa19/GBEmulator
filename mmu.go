@@ -1,0 +1,71 @@
+package main
+
+type MMU struct {
+    rom  []byte     // Load the file into here
+    vram [8192]byte // 8KB
+	eram [8192]byte // 8KB
+    wram [8192]byte // 8KB
+    oam  [160]byte  // Sprite memory
+    io   [128]byte  // I/O ports
+    hram [127]byte  // High RAM
+    ie   byte       // Interrupt Enable (just 1 byte)
+}
+
+func newMMU(rom []byte) *MMU {
+	return &MMU{
+		rom: rom,
+	}
+}
+
+func (m *MMU) Read(addr uint16) byte {
+	switch {
+	case addr < 0x8000: // ROM
+		return m.rom[addr]
+	case addr < 0xA000: // VRAM
+		return m.vram[addr - 0x8000]
+	case addr < 0xC000:	// ERAM
+        return 0
+	case addr < 0xE000: //WRAM
+		return m.wram[addr - 0xC000]
+	case addr < 0xFE00: // Echo ram
+		return 0
+	case addr < 0xFEA0: // oam
+		return m.oam[addr - 0xFE00]
+	case addr < 0xFF00: // not usable
+		return 0
+	case addr < 0xFF80: // IO
+		return m.io[addr - 0xFF00]
+	case addr < 0xFFFF: // HRAM
+		return m.hram[addr - 0xFF80]
+	case addr == 0xFFFF: // IE
+		return m.ie
+	default:
+		return 0
+	}
+}
+
+
+func (m *MMU) Write(addr uint16, b byte) {
+	switch {
+	case addr < 0x8000:
+		return
+	case addr < 0xA000: // VRAM
+		m.vram[addr - 0x8000] = b
+	case addr < 0xC000:	// ERAM
+		m.eram[addr - 0xA000] = b
+	case addr < 0xE000: //WRAM
+		m.wram[addr - 0xC000] = b
+	case addr < 0xFE00: // Echo ram
+		return
+	case addr < 0xFEA0: // oam
+		m.oam[addr - 0xFE00] = b
+	case addr < 0xFF00: // not usable
+		return
+	case addr < 0xFF80: // IO
+		m.io[addr - 0xFF00] = b
+	case addr < 0xFFFF: // HRAM
+		m.hram[addr - 0xFF80] = b
+	case addr == 0xFFFF: // IE
+		m.ie = b
+	}
+}
