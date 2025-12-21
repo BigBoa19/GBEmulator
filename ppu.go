@@ -48,18 +48,34 @@ func (ppu *PPU) getTile(tileIndex uint8) [8][8]uint8 {
 }
 
 func (ppu *PPU) RenderScanline(ly uint8) {
+    lcdControl := ppu.mmu.io[0x40]
+
+    // FIX 1: Check LCD Enable (Bit 7). If off, stop rendering.
+    // (Note: Your display loop should handle drawing "white" when this bit is 0)
+    if lcdControl&0x80 == 0 {
+        return
+    }
+
     // Only render visible scanlines (0-143)
     if ly >= 144 {
         return
     }
 
-    // Render this scanline to the back buffer
+    // FIX 2: Check Background Tile Map Display Select (Bit 3)
+    // 0 = 0x9800 (Offset 0x1800), 1 = 0x9C00 (Offset 0x1C00)
+    mapOffset := 0x1800
+    if lcdControl&0x08 != 0 {
+        mapOffset = 0x1C00
+    }
+
     tileY := int(ly) / 8
     pixelY := int(ly) % 8
 
     for tileX := 0; tileX < 20; tileX++ {
         mapIndex := tileY*32 + tileX
-        tileIndex := ppu.mmu.vram[0x1800+mapIndex]
+        
+        // Use the calculated mapOffset instead of hardcoded 0x1800
+        tileIndex := ppu.mmu.vram[mapOffset+mapIndex]
         tile := ppu.getTile(tileIndex)
 
         for px := 0; px < 8; px++ {

@@ -66,6 +66,13 @@ func (m *MMU) Read(addr uint16) byte {
 	case addr < 0xFF00: // not usable
 		return 0
 	case addr < 0xFF80: // IO
+		if addr == 0xFF00 {
+            // Return 0xFF (all 1s) to indicate NO buttons are pressed.
+            // If you return 0x00, the game thinks you are holding A+B+Start+Select
+            // and will trigger a Soft Reset loop.
+            return 0xFF
+        }
+
 		if addr == 0xFF44 { // LY register - current scanline
 			// Return the actual LY value from io array
 			return m.io[0x44]
@@ -97,6 +104,18 @@ func (m *MMU) Write(addr uint16, b byte) {
 	case addr < 0xFF00: // not usable
 		return
 	case addr < 0xFF80: // IO
+	    if addr == 0xFF40 {
+            // FIX: Handle LCDC Control specifically
+            oldLCDC := m.io[0x40]
+            m.io[0x40] = b
+            
+            // Check if LCD is being turned off (Bit 7 went from 1 to 0)
+            if (oldLCDC&0x80 != 0) && (b&0x80 == 0) {
+                m.scanlineCounter = 0
+                m.io[0x44] = 0 // Reset LY to 0 immediately
+            }
+            return
+        }
 		if addr == 0xFF44 { // LY (scanline)
 			return // LY is read-only, writes are ignored
 		}
